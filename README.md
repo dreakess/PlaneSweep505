@@ -13,7 +13,7 @@ GPU implementation in CUDA of a **Plane Sweeping** algorithm for depth estimatio
    - [Projection Geometry](#projection-geometry)
 3. [Code Architecture](#code-architecture)
 4. [Implemented Optimization Strategies](#implemented-optimization-strategies)
-   - [Naive 3D Kernel](#naive-3d-kernel)
+   - [Naive Kernel](#naive-kernel)
    - [Shared Memory Kernel](#shared-memory-kernel)
    - [Constant Memory](#constant-memory)
    - [Precision: Float vs Double](#precision-float-vs-double)
@@ -84,56 +84,68 @@ Each camera's parameters are passed as a vector of 21 values:
 ```
 planeSweeping.cu
 ├── Macros and typedef
-│   ├── MI(r, c, width)         → linear 2D/3D indexing
-│   ├── BLOCKSIZE               → thread block size (x and y)
-│   ├── RAD                     → SAD window radius
-│   └── USE_DOUBLE              → precision selector
+│   ├── MI(r, c, width)       → linear 2D/3D indexing
+│   ├── BLOCKSIZE             → thread block size (x and y)
+│   ├── RAD                   → SAD window radius
+│   └── USE_DOUBLE            → precision selector
 │
 ├── Constant Memory
 │   ├── c_invK, c_R_inv, c_t_inv      → reference camera parameters
 │   └── c_K_proj, c_R_proj, c_t_proj  → current sensor camera parameters
 │
-├── GPU Kernels
-│   ├── warmup()                → stabilizes GPU clock frequencies
-│   ├── initCostCube()          → initializes cost cube to 255.0f
-│   ├── planeSweepingSAD_Naive_Pure3D_Kernel()   → naive version
-│   └── planeSweepingSAD_Shared_Pure3D_Kernel()  → shared memory version
+├── Timers
+│   ├── start_cpu_timer() / end_cpu_timer()   → wall-clock timing (std::chrono)
+│   └── start_cuda_timer() / end_cuda_timer() → GPU event-based timing
 │
-└── runPlaneSweepingGPU()       → host interface: allocate, transfer, launch kernels
+├── GPU Kernels
+│   ├── warmup()              → stabilizes GPU clock frequencies (optional)
+│   ├── initCostCube()        → initializes cost cube to 255.0f
+│   ├── naive_kernel()        → baseline version, reads directly from global VRAM
+│   └── shared_kernel()       → optimized version using shared memory tile with halo
+│
+└── runPlaneSweepingGPU()     → host interface: allocate, transfer, launch kernels
 ```
 
 ---
 
 ## Implemented Optimization Strategies
 
-### Naive 3D Kernel
+### Naive Kernel
 
-**Function:** `planeSweepingSAD_Naive_Pure3D_Kernel`
+**Function:** `naive_kernel`
 
-Baseline version. Each thread reads SAD window pixels directly from **global VRAM**, for every Z plane.
+Baseline version. Each thread reads SAD window pixels directly from **global VRAM** for every Z plane.
 
 - **3D grid**: `(img_w / BLOCKSIZE, img_h / BLOCKSIZE, ZPlanes)` — each Z block corresponds to one depth plane.
-- **Pros**: simple to implement and debug.
+- **Pros**: simple to implement and debug; no shared memory overhead.
 - **Cons**: high memory latency, no data reuse. Each reference pixel is re-read from VRAM for every Z plane — the access pattern is not cache-friendly along the Z dimension.
 
 ### Shared Memory Kernel
 
-**Function:** `planeSweepingSAD_Shared_Pure3D_Kernel`
+**Function:** `shared_kernel`
 
-Optimization via **shared memory (SHMEM)**. Before computing the SAD, each block loads a tile of the reference camera image — including the surrounding halo of width `RAD` — into shared memory. Threads then read from SHMEM instead of global VRAM.
+Optimization via **shared memory (SHMEM)**. Before computing the SAD, each block loads a tile of the reference camera image — including the surrounding halo of width `RAD` — into shared memory. Threads then read reference pixels from SHMEM instead of global VRAM.
 
-Loading is split into regions:
-- tile center
-- left/right and top/bottom borders
-- four corners
+The tile loading is split into 9 regions to ensure full coverage of the halo:
+
+```
+┌──────────┬──────────────┬──────────┐
+│ Top-Left │     Top      │ Top-Right│
+├──────────┼──────────────┼──────────┤
+│   Left   │    Center    │   Right  │
+├──────────┼──────────────┼──────────┤
+│ Bot-Left │    Bottom    │ Bot-Right│
+└──────────┴──────────────┴──────────┘
+```
+
+A `__syncthreads()` barrier ensures all threads have finished loading before any SAD computation begins.
 
 ```
 SHMEM size = (BLOCKSIZE + 2*RAD)^2 * sizeof(uint8_t)
 ```
 
 - **Pros**: significantly reduces global VRAM accesses for reference pixels within the SAD window.
-- **Cons**: shared memory is reloaded for every Z plane (pure 3D grid), so the gain is partial compared to an approach with an explicit Z loop.
-- **Important note**: the code comment explicitly warns about this limitation: *"the GPU is forced to reload the halo from VRAM for every single Z plane"*.
+- **Cons**: shared memory is reloaded for every Z plane (pure 3D grid), so the gain is partial compared to an approach with an explicit Z loop. Sensor pixels (`sensY`) are still read from global memory.
 
 ### Constant Memory
 
@@ -148,10 +160,12 @@ __constant__ Real c_R_proj[9];
 __constant__ Real c_t_proj[3];
 ```
 
-Parameters are updated between sensor cameras via `cudaMemcpyToSymbol`.
+Reference camera parameters are uploaded once before the sensor loop. Sensor parameters are updated at each iteration via `cudaMemcpyToSymbol`.
 
 - **Pros**: uniform access from all threads, dedicated cache, no L2 bandwidth consumption.
 - **Cons**: limited capacity (64 KB total on most GPUs).
+
+> **Alternative (commented out):** The file also contains a commented `__device__` variant for the same parameters. Unlike `__constant__`, `__device__` variables reside in regular global memory and do not benefit from the broadcast cache. They are kept for comparison purposes only.
 
 ### Precision: Float vs Double
 
@@ -161,7 +175,7 @@ The code supports both precisions via the `USE_DOUBLE` macro:
 #define USE_DOUBLE 0  // 0 = float, 1 = double
 ```
 
-This selects the `Real` type used in all intermediate geometric computations (back-projection, world transformation, projection). The final cost in the cost cube is always `float`.
+This selects the `Real` type used in all intermediate geometric computations (back-projection, world transformation, projection). The final cost written to the cost cube is always `float`.
 
 - **Float**: double throughput on FP operations, lower memory bandwidth pressure.
 - **Double**: necessary when the scene has a very wide depth range or requires high numerical precision.
@@ -172,19 +186,19 @@ This selects the `Real` type used in all intermediate geometric computations (ba
 
 ### 1. Select the kernel (Naive vs Shared Memory)
 
-In `planeSweeping.cu`, inside `runPlaneSweepingGPU()`, find the kernel launch block and comment/uncomment the desired version:
+In `planeSweeping.cu`, inside `runPlaneSweepingGPU()`, find the two kernel launch lines and comment out the one you do **not** want to run:
 
 ```cpp
-// === NAIVE VERSION (no shared memory) ===
-planeSweepingSAD_Naive_Pure3D_Kernel<<<grid_3D, block>>>(
+// === SHARED MEMORY VERSION (recommended) ===
+shared_kernel<<<grid_3D, block, sharedMemBytes>>>(
     d_ref, d_sens, d_costCube, width, height, ZNear, ZFar, ZPlanes);
 
-// === SHARED MEMORY VERSION ===
-// planeSweepingSAD_Shared_Pure3D_Kernel<<<grid_3D, block, sharedMemBytes>>>(
-//     d_ref, d_sens, d_costCube, width, height, ZNear, ZFar, ZPlanes);
+// === NAIVE VERSION (baseline, no shared memory) ===
+naive_kernel<<<grid_3D, block>>>(
+    d_ref, d_sens, d_costCube, width, height, ZNear, ZFar, ZPlanes);
 ```
 
-Only activate one version at a time.
+> **Important:** both kernel calls are currently active in the source. Since both write to the same cost cube using `fminf`, running both simultaneously will produce a result but will prevent a fair performance comparison. **Keep only one active at a time** when benchmarking.
 
 ### 2. Select numerical precision
 
@@ -203,7 +217,7 @@ At the top of the file:
 // RAD 3 → 7x7 window
 ```
 
-Increasing `RAD` improves matching robustness but raises operation count quadratically: `(2*RAD+1)^2`.
+Increasing `RAD` improves matching robustness but raises operation count quadratically: `(2*RAD+1)^2`. It also increases the SHMEM requirement for the shared kernel.
 
 ### 4. Configure the CUDA block size
 
@@ -216,11 +230,12 @@ Higher values increase theoretical occupancy but reduce the shared memory availa
 
 ### 5. Enable/disable GPU warmup
 
-The warmup is commented out in the code. To re-enable it (useful for more accurate benchmarks on GPUs with dynamic frequency boost), uncomment the relevant lines:
+The warmup kernel is commented out. To re-enable it (useful for more accurate benchmarks on GPUs with dynamic frequency boost), uncomment the relevant block in `runPlaneSweepingGPU()`:
 
 ```cpp
 // float* warmupA; float* warmupB;
 // CHK(cudaMalloc(&warmupA, plane));
+// CHK(cudaMalloc(&warmupB, plane));
 // ...
 // warmup<<<warmupgrid, warmupblock>>>(warmupA, warmupB, width, height);
 ```
@@ -229,15 +244,60 @@ The warmup is commented out in the code. To re-enable it (useful for more accura
 
 ## Main Parameters
 
-| Parameter | Description | Default |
-|-----------|-------------|---------|
-| `BLOCKSIZE` | Thread block size (x and y) | `16` |
-| `RAD` | SAD window radius | `1` |
-| `USE_DOUBLE` | Precision: 0=float, 1=double | `0` |
-| `ZNear` | Minimum depth to estimate | scene-dependent |
-| `ZFar` | Maximum depth to estimate | scene-dependent |
-| `ZPlanes` | Number of depth planes | typically 64–256 |
+| Parameter   | Description                         | Default           |
+|-------------|-------------------------------------|-------------------|
+| `BLOCKSIZE` | Thread block size (x and y)         | `16`              |
+| `RAD`       | SAD window radius                   | `1`               |
+| `USE_DOUBLE`| Precision: 0=float, 1=double        | `0`               |
+| `ZNear`     | Minimum depth to estimate           | scene-dependent   |
+| `ZFar`      | Maximum depth to estimate           | scene-dependent   |
+| `ZPlanes`   | Number of depth planes              | typically 64–256  |
 
 ---
 
+## Output and Performance Metrics
 
+The code measures performance using two independent timers:
+
+**CUDA event timer** — measures only the kernel execution time on the GPU:
+```
+(Kernel):
+  Processing: 0.023141 (s), GFLOPS: 12.47
+```
+
+**CPU wall-clock timer** (`std::chrono`) — measures total elapsed time including memory transfers, constant memory uploads, and synchronization:
+```
+(Total):
+  Processing: 0.031205 (s), GFLOPS: 9.24
+```
+
+Comparing the two lets you quantify the overhead of host-device transfers relative to pure compute time.
+
+FLOP count is estimated as:
+```
+FLOP = 2 * (2*RAD+1)^2 * img_w * img_h * ZPlanes * num_sensors
+```
+
+The factor of 2 approximates the subtraction and accumulation per SAD pixel. The geometric pipeline cost is excluded, so this is a lower-bound estimate.
+
+The resulting **cost cube** has dimensions `[ZPlanes × img_h × img_w]` in `float`. To extract the depth map, select for each pixel `(i, j)` the plane `zi` with the minimum cost and convert it to depth using the inverse formula:
+
+```
+depth(i, j) = ZNear * ZFar / (ZNear + (zi_min / ZPlanes) * (ZFar - ZNear))
+```
+
+---
+
+## Requirements
+
+- CUDA Toolkit ≥ 11.0
+- GPU with Compute Capability ≥ 6.0 (Pascal or newer)
+- C++14-compatible compiler (`nvcc`)
+
+Example compilation:
+
+```bash
+nvcc -O3 -arch=sm_86 planeSweeping.cu -o planeSweeping
+```
+
+Replace `sm_86` with your GPU's architecture (`sm_75` for Turing, `sm_80` for Ampere A100, etc.).
