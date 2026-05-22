@@ -15,6 +15,28 @@
 
 #define SHRT_MAX 32767
 
+std::chrono::high_resolution_clock::time_point start_cpu_timer()
+{
+	return std::chrono::high_resolution_clock::now();
+}
+
+void end_cpu_timer(std::chrono::high_resolution_clock::time_point start, const char* name, double flop)
+{
+	auto stop = std::chrono::high_resolution_clock::now();
+	double seconds = std::chrono::duration_cast<std::chrono::duration<double>>(stop - start).count();
+	double gflops = flop / seconds / 1e9;
+
+	printf("%s:\n", name);
+	printf("  Processing: %.6f (s), GFLOPS: %.2f\n", seconds, gflops);
+}
+
+double calculateFLOPs(int img_w, int img_h, int ZPlanes, size_t num_sensors, int window)
+{
+	int kernel_size = 2 * window;
+	// 2 ops per SAD comparison + geometry overhead
+	return 2.0 * kernel_size * kernel_size * img_w * img_h * ZPlanes * num_sensors;
+}
+
 std::vector<cam> read_cams(std::string const& folder)
 {
 	// Init parameters
@@ -33,11 +55,13 @@ std::vector<cam> read_cams(std::string const& folder)
 		const int width = im_rgb.cols;
 		const int height = im_rgb.rows;
 
-		cv::cvtColor(im_rgb, im_yuv, cv::COLOR_BGR2YUV);
+		cv::cvtColor(im_rgb, im_yuv, cv::COLOR_BGR2YUV_I420);
 
+		// Adesso lo split separerà correttamente i piani in Y, U e V
 		std::vector<cv::Mat> YUV;
-		cv::split(im_yuv, YUV); 
+		cv::split(im_yuv, YUV); // <-- Applicato a im_yuv, NON a im_rgb!
 
+		// Ora YUV[0] contiene davvero il canale Y (Luminanza)
 		std::vector<uint8_t> Y(YUV[0].data, YUV[0].data + width * height);
 		const int size = width * height * 1.5; // YUV 420
 
@@ -318,10 +342,12 @@ int main()
 
 	float* cost_cube_flat = new float[imgSize * ZPlanes];
 
+	auto cpu_start = start_cpu_timer();
 	// Call CUDA function
-	auto kernel_start = std::chrono::high_resolution_clock::now();
-	runPlaneSweepingGPU(ref_image, width, height, sensor_images, cam_params_vec, cost_cube_flat, ZNear, ZFar, ZPlanes);
-	auto kernel_end = std::chrono::high_resolution_clock::now();
+	//auto kernel_start = std::chrono::high_resolution_clock::now();
+	runPlaneSweepingGPU(ref_image, width, height, sensor_images, cam_params_vec, 
+	cost_cube_flat, ZNear, ZFar, ZPlanes);
+	//auto kernel_end = std::chrono::high_resolution_clock::now();
 
 	std::vector<cv::Mat> cost_cube(ZPlanes);
 	// Convert to cv::Mat for graph cut
@@ -329,26 +355,20 @@ int main()
 		cost_cube[z] = cv::Mat(height, width, CV_32FC1, cost_cube_flat + z * imgSize);
 	}
 
-	//auto kernel_start = std::chrono::high_resolution_clock::now();
+
+	double flops = calculateFLOPs(width, height, ZPlanes, sensor_images.size(), 3);
 	//std::vector<cv::Mat> cost_cube = sweeping_plane(cam_vector[0], cam_vector, 3);
-	//auto kernel_end = std::chrono::high_resolution_clock::now();
 
 	// Use graph cut to generate depth map 
 	// Cleaner results, long compute time
-	//cv::Mat depth = depth_estimation_by_graph_cut_sWeight(cost_cube);
-
+	cv::Mat depth = depth_estimation_by_graph_cut_sWeight(cost_cube);
+	end_cpu_timer(cpu_start, "cpu time", flops);
+	
 	// Find min cost and generate depth map
 	// Faster result, low quality
-	cv::Mat depth = find_min(cost_cube);
+	//cv::Mat depth = find_min(cost_cube);
 
-	auto total_end = std::chrono::high_resolution_clock::now();
 
-	double kernel_ms = std::chrono::duration<double>(kernel_end - kernel_start).count();
-
-	double total_ms = std::chrono::duration<double>(total_end - total_start).count();
-
-	//printf("Kernel time: %.3f s\n", kernel_ms);
-	//printf("Total time: %.3f s \n", total_ms);
 
 
 
