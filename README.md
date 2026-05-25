@@ -27,7 +27,53 @@ Reference camera parameters are uploaded once before the sensor loop. Sensor par
 
 ## How to Configure and Select Optimizations
 
-### 1. Select the kernel (Naive vs Shared Memory)
+### 1. Select numerical precision
+
+At the top of the file:
+
+```cpp
+#define USE_DOUBLE 0   // Float (default)
+#define USE_DOUBLE 1   // Double (higher precision)
+```
+
+### 2. Configure the SAD window size
+
+```cpp
+#define RAD 1   // 3x3 window (default)
+// RAD 2 → 5x5 window, more robust to noise but more expensive
+// RAD 3 → 7x7 window
+```
+
+### 3. Configure the CUDA block size
+
+```cpp
+#define BLOCKSIZE 16   // 16x16 threads per block (default)
+// Typical values: 8, 16, 32
+```
+
+
+### 4 Select where store the matrix
+
+```cpp
+__constant__ Real c_invK[9];
+__constant__ Real c_R_inv[9];
+__constant__ Real c_t_inv[3];
+__constant__ Real c_K_proj[9];
+__constant__ Real c_R_proj[9];
+__constant__ Real c_t_proj[3];
+
+//__device__ Real c_invK[9];
+//__device__ Real c_R_inv[9];
+//__device__ Real c_t_inv[3];
+//__device__ Real c_K_proj[9];
+//__device__ Real c_R_proj[9];
+//__device__ Real c_t_proj[3];
+
+// now for example we are using the constant memory 
+
+```
+
+### 5. Select the kernel (Naive vs Shared Memory)
 
 In `planeSweeping.cu`, inside `runPlaneSweepingGPU()`, find the two kernel launch lines and comment out the one you do **not** want to run:
 
@@ -40,34 +86,6 @@ shared_kernel<<<grid_3D, block, sharedMemBytes>>>(
 naive_kernel<<<grid_3D, block>>>(
     d_ref, d_sens, d_costCube, width, height, ZNear, ZFar, ZPlanes);
 ```
-
-### 2. Select numerical precision
-
-At the top of the file:
-
-```cpp
-#define USE_DOUBLE 0   // Float (default, faster)
-#define USE_DOUBLE 1   // Double (higher precision)
-```
-
-### 3. Configure the SAD window size
-
-```cpp
-#define RAD 1   // 3x3 window (default)
-// RAD 2 → 5x5 window, more robust to noise but more expensive
-// RAD 3 → 7x7 window
-```
-
-Increasing `RAD` improves matching robustness but raises operation count quadratically: `(2*RAD+1)^2`. It also increases the SHMEM requirement for the shared kernel.
-
-### 4. Configure the CUDA block size
-
-```cpp
-#define BLOCKSIZE 16   // 16x16 threads per block (default)
-// Typical values: 8, 16, 32
-```
-
-Higher values increase theoretical occupancy but reduce the shared memory available per block. With `RAD=1` and `BLOCKSIZE=16`, SHMEM usage is `(16+2)^2 = 324 bytes` — well below the hardware limit.
 
 
 
