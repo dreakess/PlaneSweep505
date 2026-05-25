@@ -137,9 +137,6 @@ __constant__ Real c_t_proj[3];
 
 Reference camera parameters are uploaded once before the sensor loop. Sensor parameters are updated at each iteration via `cudaMemcpyToSymbol`.
 
-
-> **Alternative (commented out):** The file also contains a commented `__device__` variant for the same parameters. Unlike `__constant__`, `__device__` variables reside in regular global memory and do not benefit from the broadcast cache. They are kept for comparison purposes only.
-
 ### Precision: Float vs Double
 
 The code supports both precisions via the `USE_DOUBLE` macro:
@@ -162,7 +159,7 @@ This selects the `Real` type used in all intermediate geometric computations (ba
 In `planeSweeping.cu`, inside `runPlaneSweepingGPU()`, find the two kernel launch lines and comment out the one you do **not** want to run:
 
 ```cpp
-// === SHARED MEMORY VERSION (recommended) ===
+// === SHARED MEMORY VERSION ===
 shared_kernel<<<grid_3D, block, sharedMemBytes>>>(
     d_ref, d_sens, d_costCube, width, height, ZNear, ZFar, ZPlanes);
 
@@ -170,8 +167,6 @@ shared_kernel<<<grid_3D, block, sharedMemBytes>>>(
 naive_kernel<<<grid_3D, block>>>(
     d_ref, d_sens, d_costCube, width, height, ZNear, ZFar, ZPlanes);
 ```
-
-> **Important:** both kernel calls are currently active in the source. Since both write to the same cost cube using `fminf`, running both simultaneously will produce a result but will prevent a fair performance comparison. **Keep only one active at a time** when benchmarking.
 
 ### 2. Select numerical precision
 
@@ -224,7 +219,7 @@ The warmup kernel is commented out. To re-enable it (useful for more accurate be
 | `USE_DOUBLE`| Precision: 0=float, 1=double        | `0`               |
 | `ZNear`     | Minimum depth to estimate           | scene-dependent   |
 | `ZFar`      | Maximum depth to estimate           | scene-dependent   |
-| `ZPlanes`   | Number of depth planes              | typically 64–256  |
+| `ZPlanes`   | Number of depth planes              | 256               |
 
 ---
 
