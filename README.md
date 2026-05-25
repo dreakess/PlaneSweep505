@@ -5,26 +5,6 @@ GPU implementation in CUDA of a **Plane Sweeping** algorithm for depth estimatio
 ---
 
 
-
-
-### Constant Memory
-
-All camera parameters (K, R, t matrices) are stored in **constant memory** (`__constant__`), which is a dedicated broadcast cache: when all threads in a warp read the same address, latency is equivalent to a register access.
-
-```cpp
-__constant__ Real c_invK[9];
-__constant__ Real c_R_inv[9];
-__constant__ Real c_t_inv[3];
-__constant__ Real c_K_proj[9];
-__constant__ Real c_R_proj[9];
-__constant__ Real c_t_proj[3];
-```
-
-Reference camera parameters are uploaded once before the sensor loop. Sensor parameters are updated at each iteration via `cudaMemcpyToSymbol`.
-
-
----
-
 ## How to Configure and Select Optimizations
 
 ### 1. Select numerical precision
