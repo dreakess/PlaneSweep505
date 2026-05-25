@@ -184,31 +184,6 @@ Increasing `RAD` improves matching robustness but raises operation count quadrat
 
 Higher values increase theoretical occupancy but reduce the shared memory available per block. With `RAD=1` and `BLOCKSIZE=16`, SHMEM usage is `(16+2)^2 = 324 bytes` — well below the hardware limit.
 
-### 5. Enable/disable GPU warmup
 
-The warmup kernel is commented out. To re-enable it (useful for more accurate benchmarks on GPUs with dynamic frequency boost), uncomment the relevant block in `runPlaneSweepingGPU()`:
-
-```cpp
-// float* warmupA; float* warmupB;
-// CHK(cudaMalloc(&warmupA, plane));
-// CHK(cudaMalloc(&warmupB, plane));
-// ...
-// warmup<<<warmupgrid, warmupblock>>>(warmupA, warmupB, width, height);
-```
-
----
-
-## Main Parameters
-
-| Parameter   | Description                         | Default           |
-|-------------|-------------------------------------|-------------------|
-| `BLOCKSIZE` | Thread block size (x and y)         | `16`              |
-| `RAD`       | SAD window radius                   | `1`               |
-| `USE_DOUBLE`| Precision: 0=float, 1=double        | `0`               |
-| `ZNear`     | Minimum depth to estimate           | scene-dependent   |
-| `ZFar`      | Maximum depth to estimate           | scene-dependent   |
-| `ZPlanes`   | Number of depth planes              | 256               |
-
----
 
 
