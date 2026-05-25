@@ -4,26 +4,6 @@ GPU implementation in CUDA of a **Plane Sweeping** algorithm for depth estimatio
 
 ---
 
-## Table of Contents
-
-1. [Problem Overview](#problem-overview)
-2. [Theoretical Background](#theoretical-background)
-   - [Plane Sweeping](#plane-sweeping)
-   - [SAD — Sum of Absolute Differences](#sad--sum-of-absolute-differences)
-   - [Projection Geometry](#projection-geometry)
-3. [Code Architecture](#code-architecture)
-4. [Implemented Optimization Strategies](#implemented-optimization-strategies)
-   - [Naive Kernel](#naive-kernel)
-   - [Shared Memory Kernel](#shared-memory-kernel)
-   - [Constant Memory](#constant-memory)
-   - [Precision: Float vs Double](#precision-float-vs-double)
-5. [How to Configure and Select Optimizations](#how-to-configure-and-select-optimizations)
-6. [Main Parameters](#main-parameters)
-7. [Output and Performance Metrics](#output-and-performance-metrics)
-8. [Requirements](#requirements)
-
----
-
 ## Problem Overview
 
 Given a set of images captured from multiple cameras with calibrated positions and orientations, the algorithm estimates for each pixel of the **reference camera** its **depth** (distance from the camera). The result is a dense **depth map**.
@@ -117,8 +97,6 @@ planeSweeping.cu
 Baseline version. Each thread reads SAD window pixels directly from **global VRAM** for every Z plane.
 
 - **3D grid**: `(img_w / BLOCKSIZE, img_h / BLOCKSIZE, ZPlanes)` — each Z block corresponds to one depth plane.
-- **Pros**: simple to implement and debug; no shared memory overhead.
-- **Cons**: high memory latency, no data reuse. Each reference pixel is re-read from VRAM for every Z plane — the access pattern is not cache-friendly along the Z dimension.
 
 ### Shared Memory Kernel
 
@@ -144,9 +122,6 @@ A `__syncthreads()` barrier ensures all threads have finished loading before any
 SHMEM size = (BLOCKSIZE + 2*RAD)^2 * sizeof(uint8_t)
 ```
 
-- **Pros**: significantly reduces global VRAM accesses for reference pixels within the SAD window.
-- **Cons**: shared memory is reloaded for every Z plane (pure 3D grid), so the gain is partial compared to an approach with an explicit Z loop. Sensor pixels (`sensY`) are still read from global memory.
-
 ### Constant Memory
 
 All camera parameters (K, R, t matrices) are stored in **constant memory** (`__constant__`), which is a dedicated broadcast cache: when all threads in a warp read the same address, latency is equivalent to a register access.
@@ -162,8 +137,6 @@ __constant__ Real c_t_proj[3];
 
 Reference camera parameters are uploaded once before the sensor loop. Sensor parameters are updated at each iteration via `cudaMemcpyToSymbol`.
 
-- **Pros**: uniform access from all threads, dedicated cache, no L2 bandwidth consumption.
-- **Cons**: limited capacity (64 KB total on most GPUs).
 
 > **Alternative (commented out):** The file also contains a commented `__device__` variant for the same parameters. Unlike `__constant__`, `__device__` variables reside in regular global memory and do not benefit from the broadcast cache. They are kept for comparison purposes only.
 
