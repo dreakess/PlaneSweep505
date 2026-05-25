@@ -137,18 +137,6 @@ __constant__ Real c_t_proj[3];
 
 Reference camera parameters are uploaded once before the sensor loop. Sensor parameters are updated at each iteration via `cudaMemcpyToSymbol`.
 
-### Precision: Float vs Double
-
-The code supports both precisions via the `USE_DOUBLE` macro:
-
-```cpp
-#define USE_DOUBLE 0  // 0 = float, 1 = double
-```
-
-This selects the `Real` type used in all intermediate geometric computations (back-projection, world transformation, projection). The final cost written to the cost cube is always `float`.
-
-- **Float**: double throughput on FP operations, lower memory bandwidth pressure.
-- **Double**: necessary when the scene has a very wide depth range or requires high numerical precision.
 
 ---
 
