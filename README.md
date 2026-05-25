@@ -32,7 +32,7 @@ At the top of the file:
 ```
 
 
-### 4 Select where store the matrix
+### 4. Select where to store the matrices
 
 ```cpp
 __constant__ Real c_invK[9];
